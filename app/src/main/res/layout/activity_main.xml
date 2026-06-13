@@ -17,5 +17,9 @@
         android:background="#000"
         android:id="@+id/imageView"/>
 
+    <com.programminghut.realtime_object.VisionOverlayView
+        android:id="@+id/visionOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
 
 </RelativeLayout>
