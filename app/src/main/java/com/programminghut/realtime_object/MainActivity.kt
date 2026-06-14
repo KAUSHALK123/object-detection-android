@@ -176,8 +176,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         val plan = pathPlanner.planPath(trackedObstacles)
                         latestPlan = plan
 
-                        // Only silence navigation if Alia is ACTIVELY speaking or if the UI is showing transcription
-                        val isAliaBusy = isAliaActive || (tts?.isSpeaking == true)
+                        // SILENCE NAVIGATION COMPLETELY while Alia is active or speaking
+                        val isAliaBusy = isAliaActive || (tts?.isSpeaking == true) || (aliaUi.visibility == android.view.View.VISIBLE)
                         val primaryObstacle = trackedObstacles.maxByOrNull { it.riskScore }
                         
                         // Pass isAliaBusy to guidanceManager to suppress voice/haptics
@@ -259,7 +259,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 processVoiceCommand(text)
                 
-                // If it wasn't an Alia command or navigation prompt, restart listening immediately
                 if (!isAliaActive && !isTriggered && !isWaitingForDestination && !isWaitingForUberConfirmation) {
                     startListening()
                 }
@@ -298,8 +297,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
 
             if (command.contains("uber") || command.contains("ride") || command.contains("taxi") || command.contains("cab")) {
-                Log.i("MainActivity", "Intent: Uber Detected")
-                handleUberIntent(command)
+                Log.i("MainActivity", "Intent: Uber (Disabled)")
+                speakWithAlia("Uber booking is currently disabled for this session.", "UBER_DISABLED")
                 return
             } else if (command.contains("test") || command.contains("check api") || command.contains("status") || command.contains("validity")) {
                 checkApiStatus()
@@ -380,7 +379,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun describeScene(userQuery: String? = null) {
         Log.d("MainActivity", "describeScene started. Query: $userQuery")
         runOnUiThread { tvAliaSubtitle.text = "Processing..." }
-        
+
         CoroutineScope(Dispatchers.Main).launch {
             try {
                 val summary = aliaAgent.analyzeScene(latestTrackedObstacles, currentDetectedRoom?.name, userQuery)
@@ -419,6 +418,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 tvAliaSubtitle.text = "I'm listening..."
                 tvAliaTranscription.text = ""
                 startAliaAnimation()
+                // Suppress haptics immediately upon activation
+                hapticManager.stop()
             }
         }
         Handler(Looper.getMainLooper()).postDelayed({ startListening() }, 500)

@@ -56,8 +56,12 @@ class GuidanceManager(private val tts: TextToSpeech?) {
             return
         }
 
-        // 1. EMERGENCY SAFETY (Highest Priority - BYPASSES ALIA SILENCE)
+        // 1. EMERGENCY SAFETY (Highest Priority)
+        // Note: Even if Alia is busy, we allow extreme emergency "STOP" alerts if preferred.
+        // However, per request to focus on agent, we can silence these too if isUserTalking is true.
         if (plan.isCollisionImminent || plan.suggestedAction == Action.STOP_IMMEDIATELY) {
+            if (isUserTalking) return // Fully silence navigation to focus on Alia
+
             val label = primaryObstacle?.label ?: "Obstacle"
             val direction = getDirectionText(primaryObstacle?.rect)
             val dist = primaryObstacle?.distance?.toInt() ?: 3
@@ -66,7 +70,7 @@ class GuidanceManager(private val tts: TextToSpeech?) {
             return
         }
 
-        // If the user is talking to the assistant, suppress non-emergency navigation feedback
+        // If the user is talking to the assistant, suppress all other navigation feedback
         if (isUserTalking) return
 
         // 2. PERSON AWARENESS (High Priority for user requested feature)
