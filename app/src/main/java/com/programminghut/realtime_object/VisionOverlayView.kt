@@ -4,124 +4,192 @@ import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
 import android.view.View
+import java.util.Locale
 
+/**
+ * Pro-Designer Digital Eye Overlay.
+ * Renders a "Safe Walking Lane" on the ground plane.
+ */
 class VisionOverlayView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
 
     private var currentPlan: PathPlan? = null
-    private var obstacles: List<VisionObstacle> = emptyList()
-
-    private val corridorPaint = Paint().apply {
+    private var obstacles: List<NavigationMemory.TrackedObstacle> = emptyList()
+    
+    private var rollDegrees = 0f
+    private var pitchDegrees = 0f
+    
+    private val lanePaint = Paint().apply {
         style = Paint.Style.FILL
         isAntiAlias = true
     }
 
-    private val obstaclePaint = Paint().apply {
+    private val laneEdgePaint = Paint().apply {
         style = Paint.Style.STROKE
-        strokeWidth = 8f
+        strokeWidth = 15f
         isAntiAlias = true
     }
 
-    private val textPaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 38f
-        typeface = Typeface.DEFAULT_BOLD
-        setShadowLayer(5f, 0f, 0f, Color.BLACK)
+    private val stopBarPaint = Paint().apply {
+        color = Color.parseColor("#FF1744")
+        style = Paint.Style.FILL
+        isAntiAlias = true
     }
 
     private val gridPaint = Paint().apply {
-        color = Color.WHITE
-        alpha = 40
+        color = Color.parseColor("#30FFFFFF")
         strokeWidth = 2f
         style = Paint.Style.STROKE
     }
 
-    fun updateData(plan: PathPlan, obstacles: List<VisionObstacle>) {
+    private val textPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = 40f
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        setShadowLayer(8f, 0f, 0f, Color.BLACK)
+    }
+
+    private val corridorPath = Path()
+
+    fun updateData(plan: PathPlan, obstacles: List<NavigationMemory.TrackedObstacle>) {
         this.currentPlan = plan
         this.obstacles = obstacles
         invalidate()
+    }
+    
+    fun updateOrientation(rollRad: Float, pitchRad: Float) {
+        this.rollDegrees = Math.toDegrees(rollRad.toDouble()).toFloat()
+        this.pitchDegrees = Math.toDegrees(pitchRad.toDouble()).toFloat()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val w = width.toFloat()
         val h = height.toFloat()
+        if (w == 0f || h == 0f) return
 
-        // 1. Draw Perspective Grid (Ground Plane)
-        drawPerspectiveGrid(canvas, w, h)
+        // 1. Scene Background Contrast
+        canvas.drawColor(Color.argb(30, 0, 0, 0))
 
-        // 2. Draw Obstacles with Risk Heatmap
-        for (obs in obstacles) {
-            val rect = RectF(obs.rect.left * w, obs.rect.top * h, obs.rect.right * w, obs.rect.bottom * h)
-            
-            val color = when {
-                obs.riskScore > 75 -> Color.RED
-                obs.riskScore > 40 -> Color.YELLOW
-                else -> Color.CYAN
-            }
-            obstaclePaint.color = color
-            
-            // Draw Box
-            canvas.drawRoundRect(rect, 15f, 15f, obstaclePaint)
-            
-            // Draw Label in Feet
-            val labelText = "${obs.label.uppercase()} - ${String.format("%.1f", obs.distance)} ft"
-            canvas.drawText(labelText, rect.left, (rect.top - 15f).coerceAtLeast(40f), textPaint)
-        }
+        // 2. Ground-Locked Navigation Layer
+        canvas.save()
+        // Stabilize based on Gyro
+        canvas.rotate(-rollDegrees, w / 2, h / 2)
+        val pitchOffset = (pitchDegrees * 22f).coerceIn(-h * 0.35f, h * 0.35f)
+        canvas.translate(0f, pitchOffset)
 
-        // 3. Draw Autonomous Navigation Corridor
+        drawGroundGrid(canvas, w, h)
+
         currentPlan?.let { plan ->
-            drawSafeCorridor(canvas, plan, w, h)
+            if (plan.isCollisionImminent || plan.suggestedAction == Action.STOP_IMMEDIATELY) {
+                drawStopZone(canvas, w, h)
+            } else {
+                drawSafeWalkingLane(canvas, plan, w, h)
+            }
         }
+
+        canvas.restore()
+
+        // 3. Floating Hazard Indicators
+        drawHazardMarkers(canvas, w, h)
     }
 
-    private fun drawPerspectiveGrid(canvas: Canvas, w: Float, h: Float) {
-        val horizon = h * 0.4f
+    private fun drawGroundGrid(canvas: Canvas, w: Float, h: Float) {
+        val horizon = h * 0.45f
+        // Perspective lines meeting at horizon
         for (i in 0..10) {
             val x = w * i / 10f
-            canvas.drawLine(x, h, (w/2 + (x - w/2) * 0.2f), horizon, gridPaint)
+            canvas.drawLine(x, h, (w/2 + (x - w/2) * 0.1f), horizon, gridPaint)
         }
-        for (i in 0..5) {
-            val y = h - (h - horizon) * i / 5f
+        // Distance markers
+        for (i in 0..6) {
+            val y = h - (h - horizon) * (i / 6f)
             canvas.drawLine(0f, y, w, y, gridPaint)
         }
     }
 
-    private fun drawSafeCorridor(canvas: Canvas, plan: PathPlan, w: Float, h: Float) {
-        val path = Path()
-        val horizon = h * 0.45f
+    private fun drawSafeWalkingLane(canvas: Canvas, plan: PathPlan, w: Float, h: Float) {
+        corridorPath.reset()
+        val horizon = h * 0.46f
         
-        // Base of the corridor at the bottom of the screen
-        val bottomCenter = w / 2
-        val bottomWidth = w * 0.6f
+        // The "Road" base - where the user's feet are
+        val baseWidth = w * 0.85f
+        val topWidth = w * 0.12f
         
-        // Target at the horizon based on steering angle
-        // Angle to X-offset conversion: tan(angle) * perspective_depth
-        val steeringOffset = (plan.steeringAngle / 30f) * (w * 0.4f)
+        // Steering projection
+        val steeringOffset = (plan.steeringAngle / 35f) * (w * 0.48f)
         val topCenter = (w / 2) + steeringOffset
-        val topWidth = w * 0.2f
 
-        path.moveTo(bottomCenter - bottomWidth/2, h)
-        path.lineTo(bottomCenter + bottomWidth/2, h)
-        path.lineTo(topCenter + topWidth/2, horizon)
-        path.lineTo(topCenter - topWidth/2, horizon)
-        path.close()
+        corridorPath.moveTo(w/2 - baseWidth/2, h)
+        corridorPath.lineTo(w/2 + baseWidth/2, h)
+        corridorPath.lineTo(topCenter + topWidth/2, horizon)
+        corridorPath.lineTo(topCenter - topWidth/2, horizon)
+        corridorPath.close()
 
-        val corridorColor = when (plan.suggestedAction) {
-            Action.STOP_IMMEDIATELY -> Color.RED
-            Action.PROCEED_CAREFULLY -> Color.YELLOW
-            else -> Color.GREEN
+        val laneColor = if (plan.suggestedAction == Action.PROCEED_CAREFULLY) 
+            Color.parseColor("#FFEA00") else Color.parseColor("#00E676")
+        
+        lanePaint.color = laneColor
+        lanePaint.alpha = 110
+        canvas.drawPath(corridorPath, lanePaint)
+        
+        laneEdgePaint.color = laneColor
+        laneEdgePaint.alpha = 230
+        canvas.drawPath(corridorPath, laneEdgePaint)
+        
+        // Center-line dash for the "road" feel
+        val dashPaint = Paint(laneEdgePaint).apply { 
+            strokeWidth = 6f
+            pathEffect = DashPathEffect(floatArrayOf(40f, 40f), 0f)
         }
+        canvas.drawLine(w/2, h, topCenter, horizon, dashPaint)
+    }
+
+    private fun drawStopZone(canvas: Canvas, w: Float, h: Float) {
+        // A big Red "Stop Bar" at the base of the screen
+        val barHeight = h * 0.15f
+        canvas.drawRect(0f, h - barHeight, w, h, stopBarPaint)
         
-        corridorPaint.color = corridorColor
-        corridorPaint.alpha = 100 // Transparency
+        // Visual "Wall" effect
+        stopBarPaint.alpha = 100
+        canvas.drawRect(0f, h * 0.45f, w, h - barHeight, stopBarPaint)
         
-        canvas.drawPath(path, corridorPaint)
-        
-        // Add a "Glow" effect for the safe path
-        corridorPaint.style = Paint.Style.STROKE
-        corridorPaint.strokeWidth = 12f
-        corridorPaint.alpha = 180
-        canvas.drawPath(path, corridorPaint)
-        corridorPaint.style = Paint.Style.FILL
+        textPaint.textSize = 100f
+        textPaint.color = Color.WHITE
+        textPaint.textAlign = Paint.Align.CENTER
+        canvas.drawText("STOP", w / 2, h * 0.93f, textPaint)
+        textPaint.textAlign = Paint.Align.LEFT // Reset
+        textPaint.textSize = 40f
+    }
+
+    private fun drawHazardMarkers(canvas: Canvas, w: Float, h: Float) {
+        val hazardPaint = Paint().apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 10f
+            isAntiAlias = true
+        }
+
+        for (obs in obstacles) {
+            val rect = RectF(obs.rect.left * w, obs.rect.top * h, obs.rect.right * w, obs.rect.bottom * h)
+            val isUrgent = obs.riskScore > 75 || obs.distance < 4f
+            
+            hazardPaint.color = if (isUrgent) Color.parseColor("#FF1744") else Color.CYAN
+            
+            // Draw clean corner brackets
+            val l = 35f
+            canvas.drawLine(rect.left, rect.top + l, rect.left, rect.top, hazardPaint)
+            canvas.drawLine(rect.left, rect.top, rect.left + l, rect.top, hazardPaint)
+            
+            canvas.drawLine(rect.right - l, rect.top, rect.right, rect.top, hazardPaint)
+            canvas.drawLine(rect.right, rect.top, rect.right, rect.top + l, hazardPaint)
+            
+            canvas.drawLine(rect.right, rect.bottom - l, rect.right, rect.bottom, hazardPaint)
+            canvas.drawLine(rect.right, rect.bottom, rect.right - l, rect.bottom, hazardPaint)
+            
+            canvas.drawLine(rect.left + l, rect.bottom, rect.left, rect.bottom, hazardPaint)
+            canvas.drawLine(rect.left, rect.bottom, rect.left, rect.bottom - l, hazardPaint)
+
+            val labelText = "${obs.label.uppercase()} ${String.format(Locale.US, "%.1f", obs.distance)}FT"
+            canvas.drawText(labelText, rect.left, rect.top - 15f, textPaint)
+        }
     }
 }

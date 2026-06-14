@@ -1,95 +1,84 @@
 package com.programminghut.realtime_object
 
-import android.graphics.RectF
 import kotlin.math.abs
-
-data class PathPlan(
-    val steeringAngle: Float, // -30 to 30 degrees
-    val confidence: Float,
-    val suggestedAction: Action,
-    val occupancyMap: FloatArray // For visualization
-)
-
-enum class Action { MOVE_FORWARD, STEER_LEFT, STEER_RIGHT, STOP_IMMEDIATELY, PROCEED_CAREFULLY }
 
 class SafePathPlanner {
 
-    private val slices = 20 // Higher resolution polar map
+    private var lastSteeringAngle = 0f
+    private val STEERING_SMOOTHING = 0.65f
 
-    fun planPath(obstacles: List<VisionObstacle>): PathPlan {
-        val occupancy = FloatArray(slices) { 0f }
-
-        if (obstacles.isEmpty()) {
-            return PathPlan(0f, 1.0f, Action.MOVE_FORWARD, occupancy)
-        }
-
-        // 1. Build the Polar Obstacle Density Map
-        for (obs in obstacles) {
-            // Map horizontal position to slices
-            val startSlice = (obs.rect.left * slices).toInt().coerceIn(0, slices - 1)
-            val endSlice = (obs.rect.right * slices).toInt().coerceIn(0, slices - 1)
-            
-            // Influence is proportional to risk and inverse distance
-            // Closer/higher risk objects "spread" more influence to simulate user width
-            val influence = (obs.riskScore / 100f).coerceIn(0f, 1f)
-            val proximityBuffer = if (obs.distance < 4f) 2 else 1 // Buffer slices for close objects
-
-            val bufferedStart = (startSlice - proximityBuffer).coerceIn(0, slices - 1)
-            val bufferedEnd = (endSlice + proximityBuffer).coerceIn(0, slices - 1)
-
-            for (i in bufferedStart..bufferedEnd) {
-                // Decay influence slightly at the edges of the buffer
-                occupancy[i] = maxOf(occupancy[i], influence)
-            }
-        }
-
-        // 2. Find the "Maximum Free Corridor"
-        // We look for a sequence of slices with the lowest average occupancy
-        val windowSize = 6 // Target corridor width (approx 30% of FOV)
-        var minDensity = 100f
-        var bestCenterIndex = slices / 2
-
-        for (i in 0..(slices - windowSize)) {
-            var windowDensity = 0f
-            for (j in i until (i + windowSize)) {
-                windowDensity += occupancy[j]
-            }
-            
-            // Add a "Central Bias" to prefer walking straight
-            val centerBias = abs((i + windowSize / 2f) - slices / 2f) * 0.1f
-            val totalCost = windowDensity / windowSize + centerBias
-
-            if (totalCost < minDensity) {
-                minDensity = totalCost
-                bestCenterIndex = i + windowSize / 2
-            }
-        }
-
-        // 3. Generate Steering Logic
-        val centerOccupancy = occupancy[slices / 2]
-        val steeringAngle = (bestCenterIndex - slices / 2f) * (60f / slices) // Map to -30..+30
+    /**
+     * Enhanced Proactive Path Planner.
+     * Calculates optimal steering angle based on obstacle density and proximity.
+     */
+    fun planPath(obstacles: List<NavigationMemory.TrackedObstacle>): PathPlan {
+        // CORRIDOR: The space directly in front of the user
+        val corridorLeft = 0.25f
+        val corridorRight = 0.75f
         
-        val suggestedAction = when {
-            centerOccupancy > 0.85f && minDensity > 0.7f -> Action.STOP_IMMEDIATELY
-            abs(steeringAngle) > 12f -> {
-                if (steeringAngle < 0) Action.STEER_LEFT else Action.STEER_RIGHT
+        // 1. Immediate Collision Check
+        val criticalObstacles = obstacles.filter { 
+            it.distance < 4.5f && it.rect.centerX() in 0.25f..0.75f
+        }
+        
+        if (criticalObstacles.isNotEmpty()) {
+            val nearest = criticalObstacles.minBy { it.distance }
+            if (nearest.distance < 3.5f) {
+                return PathPlan(0f, 1.0f, Action.STOP_IMMEDIATELY, FloatArray(0), true)
             }
-            centerOccupancy > 0.4f -> Action.PROCEED_CAREFULLY
+        }
+
+        // 2. Continuous Steering Calculation
+        // We calculate a "Force" from each obstacle that pushes the user away
+        var totalSteerForce = 0f
+        var weightSum = 0f
+
+        for (obs in obstacles) {
+            if (obs.distance > 15.0f) continue // Ignore far away objects
+            
+            val centerX = obs.rect.centerX()
+            // Map 0..1 to -1..1 (Left to Right)
+            val normalizedPos = (centerX - 0.5f) * 2.0f
+            
+            // Influence is higher for closer objects and objects in the center
+            val proximityWeight = (15.0f - obs.distance) / 15.0f
+            val centralityWeight = 1.0f - abs(normalizedPos)
+            val weight = proximityWeight * centralityWeight
+            
+            // Push away from the obstacle
+            totalSteerForce += (-normalizedPos) * weight
+            weightSum += weight
+        }
+
+        val rawSteeringAngle = if (weightSum > 0) {
+            (totalSteerForce / weightSum) * 45f 
+        } else {
+            0f
+        }
+        
+        val finalSteeringAngle = (rawSteeringAngle * (1f - STEERING_SMOOTHING)) + (lastSteeringAngle * STEERING_SMOOTHING)
+        lastSteeringAngle = finalSteeringAngle
+
+        // 3. Action Determination
+        val centralBlockage = obstacles.any { 
+            it.rect.centerX() in corridorLeft..corridorRight && it.distance < 7.0f 
+        }
+
+        val action = when {
+            criticalObstacles.isNotEmpty() -> Action.PROCEED_CAREFULLY
+            centralBlockage && abs(finalSteeringAngle) > 10f -> {
+                if (finalSteeringAngle < 0) Action.STEER_LEFT else Action.STEER_RIGHT
+            }
+            centralBlockage -> Action.PROCEED_CAREFULLY
             else -> Action.MOVE_FORWARD
         }
 
         return PathPlan(
-            steeringAngle = steeringAngle,
-            confidence = (1.0f - minDensity).coerceIn(0.1f, 1.0f),
-            suggestedAction = suggestedAction,
-            occupancyMap = occupancy
+            steeringAngle = finalSteeringAngle.coerceIn(-45f, 45f),
+            confidence = (1.0f - (weightSum / 5f)).coerceIn(0.1f, 1.0f),
+            suggestedAction = action,
+            occupancyMap = FloatArray(0),
+            isCollisionImminent = criticalObstacles.any { it.distance < 3.5f }
         )
     }
 }
-
-data class VisionObstacle(
-    val label: String,
-    val rect: RectF,
-    val distance: Float,
-    val riskScore: Float
-)

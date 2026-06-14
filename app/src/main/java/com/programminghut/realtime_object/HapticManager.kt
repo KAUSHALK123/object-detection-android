@@ -3,6 +3,10 @@ package com.programminghut.realtime_object
 import android.content.Context
 import android.os.*
 
+/**
+ * Pro-Level Haptic Language Engine.
+ * Translates spatial and risk data into a "tactile language" for the user.
+ */
 class HapticManager(context: Context) {
 
     private val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -13,14 +17,11 @@ class HapticManager(context: Context) {
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     }
 
-    fun playFeedback(level: RiskAssessmentEngine.HazardLevel) {
-        when (level) {
-            RiskAssessmentEngine.HazardLevel.CRITICAL -> pulse(longArrayOf(0, 500, 100, 500), 0) // Continuous danger
-            RiskAssessmentEngine.HazardLevel.HIGH -> pulse(longArrayOf(0, 300, 100, 300), -1)
-            RiskAssessmentEngine.HazardLevel.MEDIUM -> pulse(longArrayOf(0, 150), -1)
-            RiskAssessmentEngine.HazardLevel.LOW -> pulse(longArrayOf(0, 50), -1)
-            RiskAssessmentEngine.HazardLevel.NONE -> vibrator.cancel()
-        }
+    private var currentLevel: RiskAssessmentEngine.HazardLevel = RiskAssessmentEngine.HazardLevel.NONE
+
+    fun playFeedback(level: RiskAssessmentEngine.HazardLevel, steeringAngle: Float) {
+        // Haptic feedback disabled as requested
+        return
     }
 
     private fun pulse(pattern: LongArray, repeat: Int) {
